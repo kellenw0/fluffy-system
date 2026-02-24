@@ -42,27 +42,32 @@ _load_env()
 ODDS_API_KEY = os.environ.get('ODDS_API_KEY')
 POLL_INTERVAL = 60  # seconds
 
-# Hardcoded — must match the topic you subscribe to in the ntfy app
-NTFY_TOPIC = 'fluffy-system-nba-q4sig-8f3kx'
+# Telegram bot notifications
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 
 # --- Notifications ---
 
 def send_notification(message, title='NBA Monitor'):
-    """Send a push notification via ntfy.sh."""
-    if not NTFY_TOPIC:
+    """Send a push notification via Telegram bot."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
+    text = f"*{title}*\n\n{message}"
     try:
         requests.post(
-            f'https://ntfy.sh/{NTFY_TOPIC}',
-            data=message,
-            headers={'Title': title},
+            f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage',
+            data={
+                'chat_id': TELEGRAM_CHAT_ID,
+                'text': text,
+                'parse_mode': 'Markdown',
+            },
             timeout=10,
         )
-        print(f"  [ntfy] Sent: {title}")
+        print(f"  [Telegram] Sent: {title}")
     except Exception as e:
-        print(f"  [ntfy] Failed: {e}")
+        print(f"  [Telegram] Failed: {e}")
 
 
 def format_games_summary(games):
@@ -333,10 +338,10 @@ def main():
     else:
         print(f"No ODDS_API_KEY set. Using synthetic line (Q1-Q3 + {TRAIN_Q4_AVG}).")
 
-    if NTFY_TOPIC:
-        print(f"Notifications enabled (ntfy topic: {NTFY_TOPIC})")
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        print(f"Telegram notifications enabled.")
     else:
-        print(f"No NTFY_TOPIC set. Notifications disabled.")
+        print(f"Telegram not configured. Notifications disabled.")
 
     # --- 1. Startup notification with today's games ---
     try:
