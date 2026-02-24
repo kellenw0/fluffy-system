@@ -292,6 +292,13 @@ def format_q3_notification(home_team, away_team, home_stats, away_stats, pred):
     """Build the Q3-ended notification message with full model results."""
     is_signal = pred['clf_prob_under'] > 0.60 and pred['model_edge'] < -2
 
+    if is_signal:
+        verdict = "BET UNDER"
+    elif pred['clf_prob_under'] > 0.55:
+        verdict = "Weak under lean"
+    else:
+        verdict = "No signal"
+
     lines = [
         f"{home_team} {home_stats['PTS']} - {away_stats['PTS']} {away_team}",
         f"Q1-Q3 Total: {pred['q123_total']}  Diff: {home_stats['PTS'] - away_stats['PTS']:+d}",
@@ -300,12 +307,9 @@ def format_q3_notification(home_team, away_team, home_stats, away_stats, pred):
         f"Line ({pred['line_source']}): {pred['line_used']:.1f}",
         f"P(under): {pred['clf_prob_under']:.0%}",
         f"Edge: {pred['model_edge']:+.1f} pts",
+        f"",
+        f"Verdict: {verdict}",
     ]
-
-    if is_signal:
-        lines.append(f"\nSIGNAL: BET UNDER")
-    elif pred['clf_prob_under'] > 0.55:
-        lines.append(f"\nWeak under lean (below threshold)")
 
     return '\n'.join(lines)
 
@@ -327,6 +331,77 @@ def log_prediction(home_team, away_team, pred):
     }
     df = pd.DataFrame([row])
     path = 'csv/live_predictions.csv'
+    df.to_csv(path, mode='a', header=not os.path.exists(path), index=False)
+
+
+def grade_prediction(home_team, away_team, pred, final_home, final_away):
+    """Compare prediction against actual final score. Returns grading dict."""
+    actual_total = final_home + final_away
+    line = pred['line_used']
+    actual_under = actual_total < line
+    clf_said_under = pred['clf_prob_under'] > 0.50
+    is_signal = pred['clf_prob_under'] > 0.60 and pred['model_edge'] < -2
+
+    return {
+        'home': home_team,
+        'away': away_team,
+        'final_home': final_home,
+        'final_away': final_away,
+        'actual_total': actual_total,
+        'actual_under': actual_under,
+        'reg_pred': round(pred['reg_pred'], 1),
+        'reg_error': round(pred['reg_pred'] - actual_total, 1),
+        'line_used': round(line, 1),
+        'line_source': pred['line_source'],
+        'clf_prob_under': round(pred['clf_prob_under'], 3),
+        'clf_correct': clf_said_under == actual_under,
+        'signal': is_signal,
+        'signal_correct': actual_under if is_signal else None,
+    }
+
+
+def format_final_notification(grade):
+    """Build the game-over notification with model grades."""
+    home, away = grade['home'], grade['away']
+    result = "UNDER" if grade['actual_under'] else "OVER"
+
+    lines = [
+        f"{home} {grade['final_home']} - {grade['final_away']} {away}",
+        f"Final total: {grade['actual_total']}  Line: {grade['line_used']}",
+        f"Result: {result}",
+        f"",
+        f"Regressor: predicted {grade['reg_pred']} (off by {grade['reg_error']:+.1f})",
+        f"Classifier: P(under) {grade['clf_prob_under']:.0%} — {'CORRECT' if grade['clf_correct'] else 'WRONG'}",
+    ]
+
+    if grade['signal']:
+        won = grade['signal_correct']
+        lines.append(f"\nSignal was: BET UNDER — {'WON' if won else 'LOST'}")
+
+    return '\n'.join(lines)
+
+
+def log_result(grade):
+    """Append graded result to CSV for future model improvement."""
+    row = {
+        'timestamp': datetime.now().isoformat(),
+        'home': grade['home'],
+        'away': grade['away'],
+        'final_home': grade['final_home'],
+        'final_away': grade['final_away'],
+        'actual_total': grade['actual_total'],
+        'actual_under': grade['actual_under'],
+        'reg_pred': grade['reg_pred'],
+        'reg_error': grade['reg_error'],
+        'line_used': grade['line_used'],
+        'line_source': grade['line_source'],
+        'clf_prob_under': grade['clf_prob_under'],
+        'clf_correct': grade['clf_correct'],
+        'signal': grade['signal'],
+        'signal_correct': grade['signal_correct'],
+    }
+    df = pd.DataFrame([row])
+    path = 'csv/live_results.csv'
     df.to_csv(path, mode='a', header=not os.path.exists(path), index=False)
 
 
@@ -362,6 +437,8 @@ def main():
     game_periods = {}   # game_id -> last known period
     game_statuses = {}  # game_id -> last known gameStatus
     processed = set()   # game_ids we've already predicted
+    predictions = {}    # game_id -> (home_team, away_team, pred) for grading at game end
+    graded = set()      # game_ids we've already graded
     current_date = date.today()
     poll_id = 0         # increments each cycle, used to cache Odds API calls
 
@@ -396,6 +473,8 @@ def main():
                 game_periods.clear()
                 game_statuses.clear()
                 processed.clear()
+                predictions.clear()
+                graded.clear()
 
             active = [g for g in games if g['gameStatus'] == 2]
             if active:
@@ -439,11 +518,27 @@ def main():
                     pred = predict_game(home_stats, away_stats, live_total)
                     print_prediction(home_team, away_team, home_stats, away_stats, pred)
                     log_prediction(home_team, away_team, pred)
+                    predictions[game_id] = (home_team, away_team, pred)
 
-                    is_signal = pred['clf_prob_under'] > 0.60 and pred['model_edge'] < -2
-                    title = f"SIGNAL: {home_team} vs {away_team}" if is_signal else f"Q3 End: {home_team} vs {away_team}"
-                    ntfy_msg = format_q3_notification(home_team, away_team, home_stats, away_stats, pred)
-                    send_notification(ntfy_msg, title=title)
+                    msg = format_q3_notification(home_team, away_team, home_stats, away_stats, pred)
+                    send_notification(msg, title=f"Q3 End: {home_team} vs {away_team}")
+
+                # --- 6. Game ended — grade predictions ---
+                if prev_status == 2 and status == 3 and game_id in predictions and game_id not in graded:
+                    graded.add(game_id)
+                    h_team, a_team, pred = predictions[game_id]
+                    final_home = game['homeTeam'].get('score', 0)
+                    final_away = game['awayTeam'].get('score', 0)
+
+                    grade = grade_prediction(h_team, a_team, pred, final_home, final_away)
+                    log_result(grade)
+
+                    print(f"\n  Final: {h_team} {final_home} - {final_away} {a_team}")
+                    print(f"  Regressor off by {grade['reg_error']:+.1f}, Classifier {'CORRECT' if grade['clf_correct'] else 'WRONG'}")
+
+                    title = f"Final: {h_team} vs {a_team}"
+                    msg = format_final_notification(grade)
+                    send_notification(msg, title=title)
 
         except SystemExit:
             break

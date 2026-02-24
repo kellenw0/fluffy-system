@@ -3,3 +3,4 @@ html/
 models/
 __pycache__/
 csv/live_predictions.csv
+csv/live_results.csv
