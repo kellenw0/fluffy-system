@@ -1,0 +1,5 @@
+.env
+html/
+models/
+__pycache__/
+csv/live_predictions.csv

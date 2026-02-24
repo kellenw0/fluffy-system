@@ -1,5 +1,7 @@
-tensorflow
+xgboost
+scikit-learn
 numpy
 pandas
-selenium
-lxml
+nba_api
+requests
+joblib
